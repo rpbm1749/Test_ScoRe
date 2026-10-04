@@ -2,34 +2,59 @@
 # Most of the time you only change `score.k` (or pass --k on the command line).
 
 providers:
+  nvidia:
+    base_url: https://integrate.api.nvidia.com/v1
+    api_key_env: NVIDIA_API_KEY        # read from .env (free key from build.nvidia.com, no card needed)
   groq:
     base_url: https://api.groq.com/openai/v1
-    api_key_env: GROQ_API_KEY          # read from .env
+    api_key_env: GROQ_API_KEY
+  cerebras:
+    base_url: https://api.cerebras.ai/v1
+    api_key_env: CEREBRAS_API_KEY
   ollama:
     base_url: http://localhost:11434/v1  # Ollama's OpenAI-compatible endpoint
 
+# Both models run on NVIDIA's free API (build.nvidia.com): 40 requests/min shared across all
+# models, no token-per-minute or daily token caps listed. The two clients split the 40
+# requests/min between them (20 each).
+#
+# Alternative: Groq's free tier (30 requests/min, 8K tokens/min, 200K tokens/day per model).
+# Groq rejects any single request over ~8K tokens, so add `max_context_tokens: 6000` and
+# `max_tokens: 1536` to a model on Groq; its oldest steps are then left out of what's sent.
+#   provider: groq, model: openai/gpt-oss-120b (or openai/gpt-oss-20b), rpm: 30, tpm: 8000
+
 models:
   # Frontier model. Used as the planner in ScoRe and as the agent in --mode frontier.
+  # NVIDIA retired gpt-oss-120b on 2026-09-03; Nemotron 3 Super (also 120B, MoE) replaces it.
+  # Run `python probe_models.py` to see which ones are live and working, then
+  # `python probe_models.py --use <model-id>` to put the best one here.
+  # If you change it, update price_per_m and active_params_b below to match that model.
   planner:
-    provider: groq
-    model: openai/gpt-oss-120b
-    reasoning_effort: low       # low | medium | high. Reasoning tokens count against your daily quota.
-    max_tokens: 2048
-    rpm: 30                     # Groq free tier limits, used for client-side throttling
-    tpm: 8000
+    provider: nvidia
+    model: nvidia/nemotron-3-super-120b-a12b    # 120B total, 12B active per token (MoE)
+    max_tokens: 4096
+    rpm: 20
+    timeout_s: 300
+    pass_back_reasoning: true   # send the model's reasoning back each turn (needed by reasoning models on NVIDIA)
+    # extra_body: {chat_template_kwargs: {enable_thinking: false}}   # optional: switch reasoning off if replies are too slow
+    # Placeholder prices (USD per million tokens) in the same class as gpt-oss-120b; no list price was
+    # checked for this model. Only used by summarize.py's est_usd column.
+    price_per_m: {input: 0.15, cached_input: 0.075, output: 0.60}
+    # Parameters active per token (from the model name: 120B total, 12B active). Used for the FLOPs estimate.
+    active_params_b: 12
 
   # Cheap model. Used as the executor in ScoRe and as the agent in --mode executor.
-  # To run it locally instead, install Ollama, run `ollama pull gpt-oss:20b`, and use:
-  #   provider: ollama
-  #   model: gpt-oss:20b
-  #   (and delete the rpm / tpm lines)
+  # To run it locally instead: install Ollama, `ollama pull gpt-oss:20b`, then
+  # provider: ollama, model: gpt-oss:20b, and delete the rpm line.
   executor:
-    provider: groq
+    provider: nvidia
     model: openai/gpt-oss-20b
-    reasoning_effort: low
+    reasoning_effort: medium    # low | medium | high (gpt-oss default: medium). Keep it the same across runs you compare.
     max_tokens: 2048
-    rpm: 30
-    tpm: 8000
+    rpm: 20
+    pass_back_reasoning: true
+    price_per_m: {input: 0.075, cached_input: 0.0375, output: 0.30}
+    active_params_b: 3.6
 
 score:
   k: 3                                   # executor steps per window (override with --k)

@@ -69,8 +69,12 @@ B. App-specific
 - Paginated APIs: always process all results by looping over page_index.
 
 C. Code
-- Write exactly one ```python code block per step, and end it with ``` on its own line.
+- Run code by calling the `execute_python` tool (not a built-in `python` tool), with exactly ONE
+  call per step, passing the code as the "code" argument. (The ```python blocks
+  above show the kind of code you would pass to it.) Wait for its output before the next step.
 - Always look at an API's spec (apis.api_docs.show_api_doc) before calling it.
+- Never assign to the name `apis` (e.g. `apis = ...`). It is how you reach every app; store
+  results in other variables, e.g. `venmo_apis = apis.api_docs.show_api_descriptions(app_name='venmo')`.
 - Write small chunks and make sure things work before doing anything irreversible.
 - Only the Python standard library and the provided app APIs are available. No OS/system operations.
 
@@ -93,13 +97,13 @@ Using these APIs, now generate code to solve the actual task.
 
 {task_line}
 
-Reply with a brief thought followed by exactly one ```python code block."""
+Reply with a brief thought, then call the execute_python tool once with the code for this step."""
 
 OBSERVATION = "Output:\n```\n{output}\n```"
 
 NO_CODE_NUDGE = (
-    "I could not find a ```python code block in your reply. Reply with a brief thought "
-    "and exactly one ```python code block."
+    "Your reply did not run any code. Reply with a brief thought, then call the execute_python tool "
+    "once with the code for this step."
 )
 
 
@@ -108,18 +112,17 @@ PLANNER_PROMPT = """\
 {guide}
 === Your role: PLANNER ===
 You are the planner in a two-model team. A smaller, cheaper EXECUTOR model takes most of the steps.
-Each time it is your turn you do two things:
-  1. Take ONE step yourself: one ```python code block (it runs in the same REPL the executor uses).
-  2. Write an instruction block for the executor's next window of up to {k} steps.
+Each time it is your turn, call the execute_python tool ONCE with two arguments:
+  1. `code`: your own ONE step (it runs in the same REPL the executor uses).
+  2. `executor_instructions`: the instruction block for the executor's next window of up to {k} steps.
 
 The executor does NOT see this conversation. It only sees the task, your latest instruction block,
 your latest step and its output, and its own steps in the current window. So your instruction block
 must contain everything it needs: exact variable names that already exist in the REPL (e.g. access
 tokens), relevant IDs/values you have found, and API names to use.
 
-Use exactly this format:
+Write executor_instructions in exactly this format:
 
-<instructions>
 SUBGOAL: <what the executor should achieve in its window>
 STEPS:
 1. <concrete step>
@@ -127,34 +130,35 @@ STEPS:
 KNOWN: <REPL variables and facts the executor needs, e.g. `spotify_access_token` holds a valid token>
 SUCCESS CHECK: <how the executor can tell the subgoal is done>
 HAND BACK IF: <conditions under which it should stop early and return control to you>
-</instructions>
-
-<brief thought about your own step>
-```python
-<your one step>
-```
 
 Rules:
 - Your own step runs BEFORE the executor's window, so write the instructions assuming it succeeds.
   If it may fail, tell the executor what to do in that case.
-- When the task is fully done (by you or by the executor), YOU call apis.supervisor.complete_task(...)
-  in your code block. You may also let the executor call it if the final step is trivial.
+- Only YOU finish the task. The executor is not allowed to call apis.supervisor.complete_task.
+  When the work is done, check the results (and the answer, if one is needed), then call
+  apis.supervisor.complete_task(...) in your own execute_python call, with executor_instructions "".
+- Don't redo work that is already done (listing apps, fetching passwords, logging in): the REPL keeps
+  every variable. Build on what exists and tell the executor about it under KNOWN.
 - Keep the instruction block short and concrete.
 
 {task_line}"""
 
 PLANNER_UPDATE = """\
-Output of your step:
-```
-{planner_output}
-```
+{planner_output_section}
 
 {executor_section}
 
 Handback reason: {reason}
 Environment steps used so far: {steps_used} of {max_steps}.
 
-Now take your next step and write the next instruction block, in the same format."""
+Now call execute_python with your next step (`code`) and the next instruction block (`executor_instructions`)."""
+
+PLANNER_OUTPUT_INLINE = """\
+Output of your step:
+```
+{output}
+```"""
+PLANNER_OUTPUT_IN_TOOL = "(The output of your step is in the tool result above.)"
 
 PLANNER_FIRST_TURN_NOTE = "This is the start of the task. Nothing has been executed yet."
 
@@ -171,10 +175,29 @@ Output:
 {output}
 ```"""
 
+EXECUTOR_PROPOSAL = """\
+The executor then tried to finish the task. That code was NOT run (only you may finish):
+{thought}
+```python
+{code}
+```
+Check the work and the answer, then finish the task yourself or continue."""
+
+PLANNER_LAST_STEP = (
+    "This is your LAST available step. Call apis.supervisor.complete_task(...) now, with the best "
+    "answer you have (or status=\"fail\" if the task could not be done)."
+)
+
+PLANNER_ASK_INSTRUCTIONS = (
+    "Your step ran, but you didn't give the executor any instructions, so it can't continue. Reply with "
+    "ONLY the instruction block for its next window (SUBGOAL, STEPS, KNOWN, SUCCESS CHECK, HAND BACK IF), "
+    "as plain text inside <instructions>...</instructions>. Don't run any code."
+)
+INSTRUCTIONS_ONLY_NOT_RUN = "Not executed: only the instruction block was requested this turn."
+
 PLANNER_NO_FORMAT_NUDGE = (
-    "I could not find an <instructions> block or a ```python code block in your reply. "
-    "Reply in the required format: an <instructions>...</instructions> block, then a brief thought "
-    "and one ```python code block."
+    "Your reply did not call execute_python. Call it once, with `code` (your step) and "
+    "`executor_instructions` (the instruction block)."
 )
 
 
@@ -183,13 +206,19 @@ EXECUTOR_PROMPT = """\
 {guide}
 === Your role: EXECUTOR ===
 You are the executor in a two-model team. A planner model has set you a subgoal. You have a budget of
-up to {k} steps in this window. Each step is exactly one ```python code block. Variables created by
+up to {k} steps in this window. Each step is exactly one execute_python tool call. Variables created by
 earlier steps (yours or the planner's) still exist in the REPL.
 
 Follow the planner's instructions. If the SUCCESS CHECK is met, or a HAND BACK IF condition happens,
 or you are stuck or missing information, reply with a single line:
 HANDBACK: <one-sentence reason>
-and no code block. Control then returns to the planner.
+and no tool call. Control then returns to the planner.
+
+Start from the planner's instructions and the KNOWN facts: don't repeat discovery the planner has
+already done (listing apps, fetching passwords, logging in) unless the instructions ask for it.
+
+Never call apis.supervisor.complete_task yourself: only the planner finishes the task. If you think
+the whole task is done, reply HANDBACK: task done, and include the final answer (if one is needed).
 
 {task_line}
 
@@ -205,9 +234,12 @@ Output:
 {planner_output}
 ```
 
-Now take your first step: a brief thought and exactly one ```python code block (or HANDBACK: ...)."""
+Now take your first step: a brief thought, then one execute_python call (or reply HANDBACK: ...)."""
 
 EXECUTOR_NO_CODE_NUDGE = (
-    "Reply with a brief thought and exactly one ```python code block, or with a single line "
-    "HANDBACK: <reason> if you want to return control to the planner."
+    "Your reply did not run any code. Reply with a brief thought and one execute_python call, or with "
+    "a single line HANDBACK: <reason> if you want to return control to the planner."
 )
+
+EXTRA_CALL_NOT_RUN = "Not executed: only one execute_python call is run per step."
+EMPTY_CODE = "Not executed: the code argument was empty."

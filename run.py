@@ -14,6 +14,7 @@ daily quota runs out you just run it again the next day.
 from __future__ import annotations
 
 import argparse
+import os
 import json
 import sys
 import time
@@ -22,6 +23,13 @@ from pathlib import Path
 
 import yaml
 from dotenv import load_dotenv
+
+# On Windows, Python writes files in a legacy encoding by default and AppWorld's evaluator
+# crashes on non-ASCII text ("'charmap' codec can't encode"). Re-launch in UTF-8 mode.
+if os.name == "nt" and not sys.flags.utf8_mode:
+    import subprocess
+
+    sys.exit(subprocess.call([sys.executable, "-X", "utf8", *sys.argv]))
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
@@ -46,13 +54,17 @@ def load_task_list(cfg: dict, args: argparse.Namespace) -> list[str]:
 
 
 def done_task_ids(results_path: Path) -> set[str]:
+    """Tasks already finished. Tasks whose latest attempt crashed (end_reason "error") or whose
+    grading failed (eval_error) are retried;
+    summarize.py uses the latest line per task, so the retry replaces the crashed attempt."""
     if not results_path.exists():
         return set()
-    done = set()
+    latest: dict[str, dict] = {}
     for line in results_path.read_text(encoding="utf-8").splitlines():
         if line.strip():
-            done.add(json.loads(line)["task_id"])
-    return done
+            row = json.loads(line)
+            latest[row["task_id"]] = row
+    return {t for t, row in latest.items() if row.get("end_reason") != "error" and not row.get("eval_error")}
 
 
 def make_env(task_id: str, run_name: str, max_steps: int):
@@ -67,26 +79,26 @@ def summarise(task_id: str, mode: str, k: int | None, end_reason: str, traj_d: d
     cheap_role = "executor" if mode == "score" else ("executor" if mode == "executor" else None)
     fu = usage.get(frontier_role, {}) if frontier_role else {}
     cu = usage.get(cheap_role, {}) if cheap_role else {}
-    return {
+    row = {
         "task_id": task_id,
         "mode": mode,
         "k": k,
         "success": evaluation.get("success", False),
         "pass_percentage": evaluation.get("pass_percentage", 0.0),
+        "eval_error": evaluation.get("eval_error"),
         "end_reason": end_reason,
         "error": error,
         "env_steps": sum(traj_d["steps_by_actor"].values()),
         "steps_by_actor": traj_d["steps_by_actor"],
-        "frontier_calls": fu.get("calls", 0),
-        "frontier_prompt_tokens": fu.get("prompt_tokens", 0),
-        "frontier_completion_tokens": fu.get("completion_tokens", 0),
-        "frontier_cached_tokens": fu.get("cached_tokens", 0),
-        "cheap_calls": cu.get("calls", 0),
-        "cheap_prompt_tokens": cu.get("prompt_tokens", 0),
-        "cheap_completion_tokens": cu.get("completion_tokens", 0),
-        "cheap_cached_tokens": cu.get("cached_tokens", 0),
         "wall_time_s": traj_d["wall_time_s"],
     }
+    for prefix, u in (("frontier", fu), ("cheap", cu)):
+        for key in (
+            "calls", "estimated_calls", "trimmed_calls", "prompt_tokens", "completion_tokens", "cached_tokens", "reasoning_tokens",
+            "latency_s", "queue_time_s", "prompt_time_s", "completion_time_s", "total_time_s",
+        ):
+            row[f"{prefix}_{key}"] = u.get(key, 0)
+    return row
 
 
 def main() -> None:

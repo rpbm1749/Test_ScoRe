@@ -11,8 +11,17 @@ diverse), first 20 after a fixed shuffle.
 from __future__ import annotations
 
 import argparse
+import sys
+import os
 import random
 from pathlib import Path
+
+# On Windows, Python writes files in a legacy encoding by default and AppWorld's evaluator
+# crashes on non-ASCII text ("'charmap' codec can't encode"). Re-launch in UTF-8 mode.
+if os.name == "nt" and not sys.flags.utf8_mode:
+    import subprocess
+
+    sys.exit(subprocess.call([sys.executable, "-X", "utf8", *sys.argv]))
 
 ROOT = Path(__file__).resolve().parent
 

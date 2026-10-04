@@ -7,15 +7,24 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
 import yaml
 from dotenv import load_dotenv
 
+# On Windows, Python writes files in a legacy encoding by default and AppWorld's evaluator
+# crashes on non-ASCII text ("'charmap' codec can't encode"). Re-launch in UTF-8 mode.
+if os.name == "nt" and not sys.flags.utf8_mode:
+    import subprocess
+
+    sys.exit(subprocess.call([sys.executable, "-X", "utf8", *sys.argv]))
+
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
+from score.actions import TOOLS, parse_action  # noqa: E402
 from score.llm import build_client  # noqa: E402
 
 
@@ -33,25 +42,37 @@ def main() -> None:
         print(f"[{role}] {mcfg['provider']} / {mcfg['model']} ... ", end="", flush=True)
         try:
             client = build_client(role, mcfg, cfg["providers"], verbose=False)
-            res = client.chat([{"role": "user", "content": "Reply with exactly: ```python\nprint('ok')\n```"}])
-            print(f"OK ({res.usage.prompt_tokens}+{res.usage.completion_tokens} tokens): {res.content.strip()[:60]!r}")
+            res = client.chat(
+                [{"role": "user", "content": "Call the execute_python tool with the code: print('ok')"}], tools=TOOLS
+            )
+            act = parse_action(res)
+            how = "tool call" if act.via_tool else ("recovered/fallback" if act.code else "NO CODE")
+            print(f"OK ({res.usage.prompt_tokens}+{res.usage.completion_tokens} tokens, {how}): {act.code!r}")
         except SystemExit as e:
             ok = False
             print(f"FAILED: {e}")
         except Exception as e:
             ok = False
             print(f"FAILED: {e.__class__.__name__}: {e}")
+            if mcfg["provider"] == "nvidia":
+                print("   Check NVIDIA_API_KEY in .env (from build.nvidia.com). Some models need you to open")
+                print("   their page on build.nvidia.com once and accept terms before the API works.")
             if mcfg["provider"] == "ollama":
                 print("   Is Ollama running? Try `ollama run gpt-oss:20b` in another terminal.")
 
     if not args.no_env:
         print("[appworld] loading task list and running one step ... ", end="", flush=True)
         try:
-            from appworld import AppWorld, load_task_ids
+            from appworld import load_task_ids
+
+            from score.env import AppWorldEnv
 
             ids = load_task_ids("dev", difficulty=3)
-            with AppWorld(task_id=ids[0], experiment_name="smoke_test") as world:
-                out = world.execute("print(apis.api_docs.show_app_descriptions())")
+            env = AppWorldEnv(task_id=ids[0], experiment_name="smoke_test", max_steps=5)
+            try:
+                out = env.execute("print(apis.api_docs.show_app_descriptions())")
+            finally:
+                env.close()
             print(f"OK ({len(ids)} hard dev tasks; first output {len(out)} chars)")
         except Exception as e:
             ok = False

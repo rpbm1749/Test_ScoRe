@@ -12,10 +12,10 @@ Trajectory   - the full log of every LLM call and every environment step, saved 
 
 from __future__ import annotations
 
-import time
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from . import clock
 from .llm import Usage
 
 
@@ -38,6 +38,7 @@ class CallRecord:
     produced_code: bool
     note: str
     usage: dict[str, Any]
+    reasoning: str = ""       # the model's reasoning text, when the provider returns it
 
 
 @dataclass
@@ -66,6 +67,8 @@ class LocalState:
     steps_taken: int = 0
     consecutive_errors: int = 0
     step_records: list[StepRecord] = field(default_factory=list)
+    proposed_final_code: str = ""       # executor's complete_task call, passed to the planner unexecuted
+    proposed_final_thought: str = ""
 
 
 class Trajectory:
@@ -76,10 +79,12 @@ class Trajectory:
         self.steps: list[StepRecord] = []
         self.calls: list[CallRecord] = []
         self.usage: dict[str, Usage] = {}
-        self.t0 = time.time()
+        self.t0 = clock.now()
 
-    def add_call(self, role: str, usage: Usage, window: int | None, produced_code: bool, note: str = "") -> None:
-        self.calls.append(CallRecord(role, window, produced_code, note, usage.to_dict()))
+    def add_call(
+        self, role: str, usage: Usage, window: int | None, produced_code: bool, note: str = "", reasoning: str = ""
+    ) -> None:
+        self.calls.append(CallRecord(role, window, produced_code, note, usage.to_dict(), reasoning[:4000]))
         self.usage.setdefault(role, Usage()).add(usage)
 
     def add_step(self, rec: StepRecord) -> None:
@@ -96,7 +101,7 @@ class Trajectory:
             "task_id": self.task_id,
             "mode": self.mode,
             "k": self.k,
-            "wall_time_s": round(time.time() - self.t0, 1),
+            "wall_time_s": round(clock.now() - self.t0, 1),
             "usage": {r: u.to_dict() for r, u in self.usage.items()},
             "steps_by_actor": self.steps_by_actor(),
             "steps": [asdict(s) for s in self.steps],

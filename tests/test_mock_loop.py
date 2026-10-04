@@ -55,19 +55,65 @@ class FakeEnv:
         pass
 
 
+class ToolReply:
+    """A scripted reply that calls execute_python (optionally several times)."""
+
+    def __init__(self, *codes: str, text: str = "thinking", instructions: str | None = None, reasoning: str = "") -> None:
+        self.codes = codes
+        self.text = text
+        self.instructions = instructions
+        self.reasoning = reasoning
+
+
+_ids = iter(range(10**6))
+
+
+def assert_valid_tool_sequence(messages: list[dict]) -> None:
+    """API rule: every tool call is answered by exactly one tool message, right after its assistant message."""
+    i = 0
+    while i < len(messages):
+        m = messages[i]
+        if m["role"] == "tool":
+            raise AssertionError(f"orphan tool message at {i}: {m}")
+        if m["role"] == "assistant" and m.get("tool_calls"):
+            ids = [c["id"] for c in m["tool_calls"]]
+            answered = []
+            j = i + 1
+            while j < len(messages) and messages[j]["role"] == "tool":
+                answered.append(messages[j]["tool_call_id"])
+                j += 1
+            assert j < len(messages) or answered, "a request may not end on an unanswered tool call"
+            assert sorted(answered) == sorted(ids), f"tool calls {ids} answered by {answered}"
+            i = j
+            continue
+        i += 1
+
+
 class ScriptedLLM:
     """Returns replies from a list; records every message list it was sent."""
 
-    def __init__(self, name: str, replies: list[str]) -> None:
+    def __init__(self, name: str, replies: list) -> None:
         self.name = name
         self.replies = list(replies)
         self.seen: list[list[dict]] = []
 
-    def chat(self, messages):
+    def chat(self, messages, tools=None):
+        assert tools and tools[0]["function"]["name"] == "execute_python"
+        assert_valid_tool_sequence(messages)
         self.seen.append([dict(m) for m in messages])
         if not self.replies:
             raise AssertionError(f"{self.name} ran out of scripted replies")
-        return ChatResult(content=self.replies.pop(0), reasoning="", usage=Usage(100, 10, 0, 1, 0.1))
+        r = self.replies.pop(0)
+        usage = Usage(prompt_tokens=100, completion_tokens=10, calls=1, latency_s=0.1, prompt_time_s=0.01, completion_time_s=0.02)
+        if isinstance(r, ToolReply):
+            calls = [
+                {"id": f"call_{next(_ids)}", "type": "function",
+                 "function": {"name": "execute_python", "arguments": json.dumps(
+                     {"code": c, **({"executor_instructions": r.instructions} if r.instructions is not None else {})})}}
+                for c in r.codes
+            ]
+            return ChatResult(content=r.text, reasoning=r.reasoning, usage=usage, tool_calls=calls)
+        return ChatResult(content=r, reasoning="", usage=usage)
 
 
 def code(c: str, thought: str = "thinking") -> str:
@@ -156,13 +202,30 @@ def test_score_consecutive_errors_hand_back():
     assert len(executor.seen) == 2
 
 
-def test_score_executor_completes_task():
+def test_executor_cannot_finish_planner_does():
     env = FakeEnv()
-    planner = ScriptedLLM("planner", [plan("a=1")])
-    executor = ScriptedLLM("executor", [code("apis.supervisor.complete_task(answer=1)")])
-    reason, traj, _ = run_score(env, planner, executor, CFG, verbose=False)
+    planner = ScriptedLLM("planner", [plan("a=1"), code("apis.supervisor.complete_task(answer=1)")])
+    executor = ScriptedLLM("executor", [code("b=2"), code("apis.supervisor.complete_task(answer=1)", "all done")])
+    reason, traj, extra = run_score(env, planner, executor, CFG, verbose=False)
     assert reason == "completed"
-    assert traj.usage["planner"].calls == 1
+    # the executor's complete_task was never executed; the planner ran the last step
+    assert not any("complete_task" in c for c in env.codes[:-1])
+    assert traj.steps[-1].actor == "planner" and "complete_task" in traj.steps[-1].code
+    assert extra["windows"][0]["handback_reason"] == "executor_ready_to_finish"
+    update = planner.seen[1][-1]["content"]
+    assert "was NOT run" in update and "complete_task(answer=1)" in update
+
+
+def test_last_step_reserved_for_planner():
+    env = FakeEnv(max_steps=4)
+    planner = ScriptedLLM("planner", [plan("p=1"), code("apis.supervisor.complete_task(answer=2)")])
+    executor = ScriptedLLM("executor", [code(f"e={i}") for i in range(10)])
+    cfg = {**CFG, "score": {**CFG["score"], "k": 10}}
+    reason, traj, extra = run_score(env, planner, executor, cfg, verbose=False)
+    assert reason == "completed" and env.steps == 4
+    assert [s.actor for s in traj.steps] == ["planner", "executor", "executor", "planner"]
+    assert extra["windows"][0]["handback_reason"] == "step_budget_reserved_for_planner"
+    assert "LAST available step" in planner.seen[1][-1]["content"]
 
 
 def test_score_k0_is_planner_only():
@@ -187,6 +250,7 @@ def test_score_respects_max_steps():
     executor = ScriptedLLM("executor", [code(f"e={i}") for i in range(10)])
     reason, traj, _ = run_score(env, planner, executor, CFG, verbose=False)
     assert reason == "max_steps" and env.steps == 4
+    assert traj.steps[-1].actor == "planner"
 
 
 # --------------------------------------------------------------------------- run.py end to end
@@ -219,3 +283,126 @@ def test_run_py_end_to_end(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "argv", ["summarize.py"])
     summarize.main()
     assert (tmp_path / "runs/summary.csv").exists()
+
+
+# --------------------------------------------------------------------------- tool calls
+def tplan(c: str, subgoal: str = "do things") -> ToolReply:
+    return ToolReply(c, text=f"<instructions>\nSUBGOAL: {subgoal}\nSTEPS:\n1. a\nKNOWN: tok\nSUCCESS CHECK: x\nHAND BACK IF: y\n</instructions>\nmy step")
+
+
+def test_single_model_with_tool_calls():
+    env = FakeEnv()
+    llm = ScriptedLLM("agent", [ToolReply("a=1"), ToolReply("x=1", "y=2"), "no code", ToolReply("apis.supervisor.complete_task()")])
+    reason, traj, _ = run_single(env, llm, CFG, role="executor", verbose=False)
+    assert reason == "completed"
+    assert env.codes == ["a=1", "x=1", "apis.supervisor.complete_task()"]   # only the first call of a reply runs
+    msgs = llm.seen[-1]
+    tool_msgs = [m for m in msgs if m["role"] == "tool"]
+    assert "output of step 1" in tool_msgs[0]["content"]
+    assert any("only one execute_python call" in m["content"] for m in tool_msgs)
+
+
+def test_score_with_tool_calls():
+    env = FakeEnv()
+    planner = ScriptedLLM("planner", [tplan("tok = login()"), ToolReply("apis.supervisor.complete_task(answer=2)")])
+    executor = ScriptedLLM("executor", [ToolReply("p = 1"), ToolReply("apis.supervisor.complete_task(answer=2)")])
+    reason, traj, extra = run_score(env, planner, executor, CFG, verbose=False)
+    assert reason == "completed"
+    assert [s.actor for s in traj.steps] == ["planner", "executor", "planner"]
+    assert extra["windows"][0]["handback_reason"] == "executor_ready_to_finish"
+    assert extra["windows"][0]["instructions"].startswith("SUBGOAL")
+    second = planner.seen[1]
+    assert second[2]["role"] == "tool" and "output of step 1" in second[2]["content"]
+    assert "tool result above" in second[-1]["content"] and "p = 1" in second[-1]["content"]
+    # the executor got the planner's step and output in its prompt
+    assert "tok = login()" in executor.seen[0][0]["content"]
+
+
+def test_tool_call_with_empty_code_is_nudged():
+    env = FakeEnv()
+    llm = ScriptedLLM("agent", [ToolReply(""), ToolReply("apis.supervisor.complete_task()")])
+    reason, traj, _ = run_single(env, llm, CFG, role="frontier", verbose=False)
+    assert reason == "completed" and env.steps == 1
+
+
+def test_planner_tool_call_with_empty_code_then_executor():
+    env = FakeEnv()
+    planner = ScriptedLLM("planner", [tplan(""), ToolReply("apis.supervisor.complete_task()")])
+    executor = ScriptedLLM("executor", [ToolReply("e=1"), "HANDBACK: done"])
+    reason, traj, _ = run_score(env, planner, executor, CFG, verbose=False)
+    assert reason == "completed"
+    assert [s.actor for s in traj.steps] == ["executor", "planner"]
+
+
+def test_errored_tasks_are_retried(tmp_path):
+    import run as runmod
+
+    path = tmp_path / "results.jsonl"
+    path.write_text(
+        json.dumps({"task_id": "a", "end_reason": "error"}) + "\n"
+        + json.dumps({"task_id": "b", "end_reason": "completed"}) + "\n"
+        + json.dumps({"task_id": "c", "end_reason": "request_too_large"}) + "\n"
+        + json.dumps({"task_id": "d", "end_reason": "completed", "eval_error": "charmap"}) + "\n"
+    )
+    assert runmod.done_task_ids(path) == {"b", "c"}
+    with open(path, "a") as f:
+        f.write(json.dumps({"task_id": "a", "end_reason": "completed"}) + "\n")
+    assert runmod.done_task_ids(path) == {"a", "b", "c"}
+
+
+# --------------------------------------------------------------------------- planner instructions
+INSTR = "SUBGOAL: find Kristin\nSTEPS:\n1. search contacts\nKNOWN: `phone_token` is valid\nSUCCESS CHECK: id found\nHAND BACK IF: none"
+
+
+def test_planner_instructions_from_tool_argument():
+    env = FakeEnv()
+    planner = ScriptedLLM("planner", [ToolReply("phone_token = 1", text="", instructions=INSTR),
+                                      ToolReply("apis.supervisor.complete_task()", text="", instructions="")])
+    executor = ScriptedLLM("executor", ["HANDBACK: done"])
+    reason, traj, extra = run_score(env, planner, executor, CFG, verbose=False)
+    assert reason == "completed"
+    assert extra["windows"][0]["instructions"] == INSTR
+    assert "find Kristin" in executor.seen[0][0]["content"]
+    assert len(planner.seen) == 2  # no follow-up needed
+
+
+def test_planner_without_instructions_is_asked_once():
+    env = FakeEnv()
+    planner = ScriptedLLM("planner", [
+        ToolReply("phone_token = 1", text=""),                         # step, but no instructions anywhere
+        f"<instructions>\n{INSTR}\n</instructions>",                  # answer to the follow-up
+        ToolReply("apis.supervisor.complete_task()", text="", instructions=""),
+    ])
+    executor = ScriptedLLM("executor", ["HANDBACK: done"])
+    reason, traj, extra = run_score(env, planner, executor, CFG, verbose=False)
+    assert reason == "completed"
+    assert extra["windows"][0]["instructions"] == INSTR
+    assert "find Kristin" in executor.seen[0][0]["content"]
+    notes = [c.note for c in traj.calls if c.role == "planner"]
+    assert "instructions_followup" in notes
+    assert "didn't give the executor any instructions" in planner.seen[1][-1]["content"]
+    assert env.codes.count("phone_token = 1") == 1  # the follow-up didn't re-run anything
+
+
+def test_followup_tool_call_is_answered_not_run():
+    env = FakeEnv()
+    planner = ScriptedLLM("planner", [
+        ToolReply("a = 1", text=""),
+        ToolReply("a = 2", text="", instructions=INSTR),   # follow-up answered with another tool call
+        ToolReply("apis.supervisor.complete_task()", text="", instructions=""),
+    ])
+    executor = ScriptedLLM("executor", ["HANDBACK: done"])
+    reason, _, extra = run_score(env, planner, executor, CFG, verbose=False)
+    assert reason == "completed" and "a = 2" not in env.codes
+    assert extra["windows"][0]["instructions"] == INSTR
+
+
+def test_planner_instructions_from_reasoning():
+    env = FakeEnv()
+    planner = ScriptedLLM("planner", [
+        ToolReply("a = 1", text="", reasoning=f"plan...\n<instructions>\n{INSTR}\n</instructions>"),
+        ToolReply("apis.supervisor.complete_task()", text="", instructions=""),
+    ])
+    executor = ScriptedLLM("executor", ["HANDBACK: done"])
+    _, _, extra = run_score(env, planner, executor, CFG, verbose=False)
+    assert extra["windows"][0]["instructions"] == INSTR
