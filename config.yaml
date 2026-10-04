@@ -1,0 +1,45 @@
+# ScoRe experiment configuration.
+# Most of the time you only change `score.k` (or pass --k on the command line).
+
+providers:
+  groq:
+    base_url: https://api.groq.com/openai/v1
+    api_key_env: GROQ_API_KEY          # read from .env
+  ollama:
+    base_url: http://localhost:11434/v1  # Ollama's OpenAI-compatible endpoint
+
+models:
+  # Frontier model. Used as the planner in ScoRe and as the agent in --mode frontier.
+  planner:
+    provider: groq
+    model: openai/gpt-oss-120b
+    reasoning_effort: low       # low | medium | high. Reasoning tokens count against your daily quota.
+    max_tokens: 2048
+    rpm: 30                     # Groq free tier limits, used for client-side throttling
+    tpm: 8000
+
+  # Cheap model. Used as the executor in ScoRe and as the agent in --mode executor.
+  # To run it locally instead, install Ollama, run `ollama pull gpt-oss:20b`, and use:
+  #   provider: ollama
+  #   model: gpt-oss:20b
+  #   (and delete the rpm / tpm lines)
+  executor:
+    provider: groq
+    model: openai/gpt-oss-20b
+    reasoning_effort: low
+    max_tokens: 2048
+    rpm: 30
+    tpm: 8000
+
+score:
+  k: 3                                   # executor steps per window (override with --k)
+  allow_early_handback: true             # executor may reply "HANDBACK: <reason>" before k steps
+  handback_on_consecutive_errors: 3      # hand back after this many failed executions in a row (0 = never)
+
+run:
+  max_steps: 50               # environment steps (code executions) per task, all modes
+  max_output_chars: 4000      # tool outputs longer than this are cut to head + tail, all modes
+  max_no_code_retries: 3      # replies without a code block before giving up
+
+tasks:
+  file: tasks/dev_hard.txt    # made by select_tasks.py
