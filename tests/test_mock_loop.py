@@ -58,11 +58,14 @@ class FakeEnv:
 class ToolReply:
     """A scripted reply that calls execute_python (optionally several times)."""
 
-    def __init__(self, *codes: str, text: str = "thinking", instructions: str | None = None, reasoning: str = "") -> None:
+    def __init__(self, *codes: str, text: str = "thinking", instructions: str | None = None, reasoning: str = "",
+                 notes: str | None = None, fetch: int | None = None) -> None:
         self.codes = codes
         self.text = text
         self.instructions = instructions
         self.reasoning = reasoning
+        self.notes = notes
+        self.fetch = fetch
 
 
 _ids = iter(range(10**6))
@@ -105,11 +108,16 @@ class ScriptedLLM:
             raise AssertionError(f"{self.name} ran out of scripted replies")
         r = self.replies.pop(0)
         usage = Usage(prompt_tokens=100, completion_tokens=10, calls=1, latency_s=0.1, prompt_time_s=0.01, completion_time_s=0.02)
+        if isinstance(r, ToolReply) and r.fetch is not None:
+            calls = [{"id": f"call_{next(_ids)}", "type": "function",
+                      "function": {"name": "get_step_output", "arguments": json.dumps({"step": r.fetch})}}]
+            return ChatResult(content="", reasoning="", usage=usage, tool_calls=calls)
         if isinstance(r, ToolReply):
             calls = [
                 {"id": f"call_{next(_ids)}", "type": "function",
                  "function": {"name": "execute_python", "arguments": json.dumps(
-                     {"code": c, **({"executor_instructions": r.instructions} if r.instructions is not None else {})})}}
+                     {"code": c, **({"executor_instructions": r.instructions} if r.instructions is not None else {}),
+                      **({"progress_notes": r.notes} if r.notes is not None else {})})}}
                 for c in r.codes
             ]
             return ChatResult(content=r.text, reasoning=r.reasoning, usage=usage, tool_calls=calls)
@@ -406,3 +414,76 @@ def test_planner_instructions_from_reasoning():
     executor = ScriptedLLM("executor", ["HANDBACK: done"])
     _, _, extra = run_score(env, planner, executor, CFG, verbose=False)
     assert extra["windows"][0]["instructions"] == INSTR
+
+
+# --------------------------------------------------------------------------- notes view
+NCFG = {**CFG, "score": {**CFG["score"], "k": 2, "planner_view": "notes"}}
+
+
+def test_notes_view_planner_sees_only_latest_window():
+    env = FakeEnv()
+    planner = ScriptedLLM("planner", [
+        ToolReply("p1 = 1", text="", instructions=INSTR, notes="NOTES-A: nothing found yet"),
+        ToolReply("p2 = 1", text="", instructions=INSTR, notes="NOTES-B: Kristin id 42"),
+        ToolReply("p3 = 1", text="", instructions=INSTR, notes="NOTES-C: paid"),
+        ToolReply("apis.supervisor.complete_task()", text="", instructions="", notes="done"),
+    ])
+    executor = ScriptedLLM("executor", [ToolReply("e_w1_a = 1"), ToolReply("e_w1_b = 1"),
+                                        ToolReply("e_w2_a = 1"), ToolReply("e_w2_b = 1"),
+                                        ToolReply("e_w3_a = 1"), ToolReply("e_w3_b = 1")])
+    reason, traj, extra = run_score(env, planner, executor, NCFG, verbose=False)
+    assert reason == "completed"
+    # every planner call is a single fresh message
+    assert all(len(seen) == 1 for seen in planner.seen)
+    third = planner.seen[2][0]["content"]
+    assert "NOTES-B: Kristin id 42" in third and "NOTES-A" not in third       # latest notes only
+    assert "e_w2_a = 1" in third and "output of step" in third                # latest window, with outputs
+    assert "e_w1_a = 1" in third                                              # ...older steps only in the one-line log
+    w1_output_marker = "output of step 2 "                                    # step 2 = first executor step of window 1
+    assert w1_output_marker not in third
+    assert "  2  executor  ok" in third                                       # step log line
+    # notes recorded per window
+    assert [w["notes"] for w in extra["windows"]][:3] == ["NOTES-A: nothing found yet", "NOTES-B: Kristin id 42", "NOTES-C: paid"]
+    # prompt size stays bounded: the 4th call isn't much bigger than the 2nd
+    sizes = [len(seen[0]["content"]) for seen in planner.seen]
+    assert sizes[3] < sizes[1] * 1.3
+
+
+def test_notes_view_fetch_tool():
+    env = FakeEnv()
+    planner = ScriptedLLM("planner", [
+        ToolReply("p1 = 1", text="", instructions=INSTR, notes="n1"),
+        ToolReply(fetch=2),                                   # re-read step 2's full output
+        ToolReply(fetch=99),                                  # a step that doesn't exist
+        ToolReply("apis.supervisor.complete_task()", text="", instructions="", notes="done"),
+    ])
+    executor = ScriptedLLM("executor", [ToolReply("e = 1"), "HANDBACK: done"])
+    reason, traj, _ = run_score(env, planner, executor, NCFG, verbose=False)
+    assert reason == "completed"
+    turn2 = planner.seen[2]                                   # the call after the first fetch
+    assert turn2[-1]["role"] == "tool" and "Full output of step 2 (executor)" in turn2[-1]["content"]
+    assert "output of step 2" in turn2[-1]["content"]
+    assert "There is no step 99" in planner.seen[3][-1]["content"]
+    notes = [c.note for c in traj.calls if c.role == "planner"]
+    assert notes.count("fetch:2") == 1 and notes.count("fetch:99") == 1
+
+
+def test_notes_view_missing_notes_keeps_old_ones():
+    env = FakeEnv()
+    planner = ScriptedLLM("planner", [
+        ToolReply("p1 = 1", text="", instructions=INSTR, notes="KEEP-ME"),
+        ToolReply("p2 = 1", text="", instructions=INSTR),         # forgot progress_notes
+        ToolReply("apis.supervisor.complete_task()", text="", instructions="", notes="done"),
+    ])
+    executor = ScriptedLLM("executor", ["HANDBACK: ok", "HANDBACK: ok"])
+    _, traj, _ = run_score(env, planner, executor, NCFG, verbose=False)
+    assert "KEEP-ME" in planner.seen[2][0]["content"]
+    assert any("no_notes" in c.note for c in traj.calls if c.role == "planner")
+
+
+def test_full_view_unchanged_by_default():
+    env = FakeEnv()
+    planner = ScriptedLLM("planner", [tplan("a=1"), ToolReply("apis.supervisor.complete_task()")])
+    executor = ScriptedLLM("executor", ["HANDBACK: done"])
+    run_score(env, planner, executor, CFG, verbose=False)
+    assert len(planner.seen[1]) > 1   # one growing conversation

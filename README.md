@@ -40,6 +40,7 @@ python run.py --mode executor --run-name executor_only     # 20B alone: lower re
 python run.py --mode frontier --run-name frontier_only     # 120B alone: upper reference
 python run.py --mode score --k 3 --run-name score_k3       # ScoRe, k = 3
 python run.py --mode score --k 5 --run-name score_k5       # ...change k per run
+python run.py --mode score --k 3 --view full --run-name score_k3_full   # the growing-history planner, for comparison
 python summarize.py                                        # comparison table -> runs\summary.csv
 ```
 
@@ -67,6 +68,18 @@ handback       ->  planner sees its step's output + all executor steps + the rea
 
 - **Global state (planner):** the planner's own running conversation: task, every instruction block it wrote, and every step by either model, with outputs cut by the same rule as the baselines (`run.max_output_chars`). It sees the same information a single-model agent would, so differences in success come from delegation, not lost information. Because it only grows by appending, it is also friendly to prompt caching.
 - **Local state (executor):** rebuilt for every window: the task, the planner's latest instruction block, the planner's latest step and output, and only the executor's own steps in this window.
+- **Planner view (`score.planner_view`, or `--view`):**
+  - `notes` (default): each planner call is built fresh from the planner's own **progress notes** (written by the planner every turn, as a third argument of its tool call), a **one-line log** of every step (number, who, ok/ERROR, first line of code), and the **full outputs of only the steps since its last turn**. Its prompt stays roughly constant instead of growing with the task. Older outputs can be re-read with a `get_step_output(step)` tool, up to `max_fetches_per_turn` times per turn; every fetch is logged (`fetches` in the results).
+  - `full`: the first version. The planner keeps one growing conversation containing every step's full output.
+- **Context the orchestrator adds (`score/context.py`, task-agnostic):** the executor's conversation is wiped every window, but the environment's state and anything already looked up persist. So every executor window (and, in the notes view, every planner turn) also gets:
+  - **Current state** from the environment's `state_summary()` hook. For AppWorld: the variables in the Python session, with type and a short preview.
+  - **Reference** collected by the environment's `reference_from_step(code, output)` hook after every step. For AppWorld: one-line API signatures and app/API lists from every documentation lookup so far.
+  - **The planner's progress notes** (notes view).
+  
+  These are built by code, not written by a model. A new environment only needs to implement the two hooks (both optional) in its adapter; the AppWorld versions live in `score/env.py`.
+- **Pre-execution check (all modes, including both baselines):** before any step runs, the environment's `validate(code)` hook can stop it and send the model a specific correction instead; the step isn't run and doesn't use an environment step. The AppWorld version checks against the task's own API catalog (`task.api_docs`) and the session's real variables: syntax errors, apps/APIs that don't exist, parameters an API doesn't have (AppWorld would silently ignore them and return wrong data), missing required parameters, doc lookups for APIs that don't exist, and undefined variables. After `run.max_rejections_in_a_row` rejections the code runs anyway, so the check can never block a run. Every rejection is logged (`rejections`). Replayed on the first five runs: 0 false alarms in 128 working steps, 7 of 10 failing steps caught, plus 6 steps that "worked" but silently used a wrong parameter.
+- **Automatic API reference:** every API a step calls or looks up, and every `app.api` the planner's instructions name, is added to the reference card straight from the task's catalog, so the executor has the real signature before its first step. In the notes view the planner sees the card too.
+- **Prompt rules that apply to any task:** the executor prints the raw records behind any fact it extracts (never only its conclusion), hands back as soon as the success check is met, and doesn't re-look-up what's in the reference. The planner names exact APIs and variables, and confirms key facts from raw data before irreversible actions.
 - **Handback reasons:** `budget_exhausted (k=…)`, `executor_handback: <reason>` (the executor replied `HANDBACK: …`), `consecutive_errors`, `executor_ready_to_finish`, `step_budget_reserved_for_planner`.
 - **The planner always takes the final step.** The executor is not allowed to call `apis.supervisor.complete_task`: if it tries, that code is not run but passed to the planner as a proposal, and the planner checks the work and finishes the task itself. The last step of the `max_steps` budget is also kept for the planner, and it is told explicitly when it is on its last step.
 - Both models share one Python REPL, so variables (e.g. access tokens) carry across windows. The planner is told to list the ones the executor needs under `KNOWN:`.
@@ -102,6 +115,7 @@ NVIDIA: 40 requests/min shared across all models (the two clients use 20 each). 
 | `config.yaml` | Models, k, step budget, truncation |
 | `score/agents.py` | The loops: single-model ReAct and ScoRe planner/executor |
 | `score/state.py` | Global state, local state, trajectory log |
+| `score/context.py` | Task-agnostic state + reference context for the models (environment hooks) |
 | `score/prompts.py` | All prompts |
 | `score/llm.py` | API client (NVIDIA, Groq, Cerebras, Ollama) with throttling, retries, optional history trimming and usage tracking |
 | `score/env.py` | AppWorld wrapper |

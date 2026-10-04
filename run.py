@@ -83,6 +83,7 @@ def summarise(task_id: str, mode: str, k: int | None, end_reason: str, traj_d: d
         "task_id": task_id,
         "mode": mode,
         "k": k,
+        "planner_view": traj_d.get("planner_view"),
         "success": evaluation.get("success", False),
         "pass_percentage": evaluation.get("pass_percentage", 0.0),
         "eval_error": evaluation.get("eval_error"),
@@ -91,6 +92,8 @@ def summarise(task_id: str, mode: str, k: int | None, end_reason: str, traj_d: d
         "env_steps": sum(traj_d["steps_by_actor"].values()),
         "steps_by_actor": traj_d["steps_by_actor"],
         "wall_time_s": traj_d["wall_time_s"],
+        "fetches": sum(1 for c in traj_d.get("calls", []) if str(c.get("note", "")).startswith("fetch:")),
+        "rejections": len(traj_d.get("rejections", [])),
     }
     for prefix, u in (("frontier", fu), ("cheap", cu)):
         for key in (
@@ -106,6 +109,7 @@ def main() -> None:
     ap.add_argument("--mode", required=True, choices=["frontier", "executor", "score"])
     ap.add_argument("--run-name", required=True, help="folder name under runs/")
     ap.add_argument("--k", type=int, help="executor steps per window (score mode); overrides config")
+    ap.add_argument("--view", choices=["notes", "full"], help="planner view (score mode); overrides config")
     ap.add_argument("--config", default="config.yaml")
     ap.add_argument("--tasks", help="task list file (default: tasks.file in config)")
     ap.add_argument("--task-ids", nargs="*", help="run these task IDs instead of a file")
@@ -117,6 +121,8 @@ def main() -> None:
     cfg = load_config(ROOT / args.config)
     if args.k is not None:
         cfg["score"]["k"] = args.k
+    if args.view is not None:
+        cfg["score"]["planner_view"] = args.view
     verbose = not args.quiet
 
     k = int(cfg["score"]["k"]) if args.mode == "score" else None
@@ -174,7 +180,8 @@ def main() -> None:
         env.close()
 
         traj_d = traj.to_dict()
-        traj_d.update({"end_reason": end_reason, "error": error, "evaluation": evaluation, **extra})
+        traj_d.update({"end_reason": end_reason, "error": error, "evaluation": evaluation, **extra,
+                       "planner_view": cfg["score"].get("planner_view", "full") if args.mode == "score" else None})
         (out_dir / f"{task_id}.json").write_text(json.dumps(traj_d, indent=1), encoding="utf-8")
         row = summarise(task_id, args.mode, k, end_reason, traj_d, evaluation, error)
         with open(results_path, "a", encoding="utf-8") as f:

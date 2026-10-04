@@ -139,6 +139,12 @@ Rules:
   apis.supervisor.complete_task(...) in your own execute_python call, with executor_instructions "".
 - Don't redo work that is already done (listing apps, fetching passwords, logging in): the REPL keeps
   every variable. Build on what exists and tell the executor about it under KNOWN.
+- Be concrete: in STEPS name the exact API (app.api_name) and parameters to use, and in KNOWN name the
+  exact REPL variables. If an API isn't known yet, look it up in your own step rather than delegating
+  the search.
+- Before anything irreversible (sending money or messages, deleting, buying), confirm the key facts
+  (amounts, recipients, IDs) from the raw data they came from, not from a summary or a printed
+  conclusion. If you haven't seen the raw data, have it printed (or re-read it) first.
 - Keep the instruction block short and concrete.
 
 {task_line}"""
@@ -214,8 +220,13 @@ or you are stuck or missing information, reply with a single line:
 HANDBACK: <one-sentence reason>
 and no tool call. Control then returns to the planner.
 
-Start from the planner's instructions and the KNOWN facts: don't repeat discovery the planner has
-already done (listing apps, fetching passwords, logging in) unless the instructions ask for it.
+Rules:
+- Start from the planner's instructions, the variables that already exist, and the API reference
+  below. Don't look up anything that is already in the reference, and don't redo work whose result
+  is already in a variable (passwords, logins, searches).
+- When you extract a fact from data (an amount, a name, an ID, a date), print the raw records it
+  came from as well as the result, so it can be checked. Never print only your conclusion.
+- As soon as the SUCCESS CHECK is met, reply HANDBACK. Don't spend leftover steps on anything else.
 
 Never call apis.supervisor.complete_task yourself: only the planner finishes the task. If you think
 the whole task is done, reply HANDBACK: task done, and include the final answer (if one is needed).
@@ -224,6 +235,12 @@ the whole task is done, reply HANDBACK: task done, and include the final answer 
 
 Planner's instructions:
 {instructions}
+{notes_section}
+=== Variables that exist in the REPL right now ===
+{state}
+
+=== API reference (already looked up; use these, don't look them up again) ===
+{reference}
 
 The planner's latest step and its output:
 ```python
@@ -243,3 +260,62 @@ EXECUTOR_NO_CODE_NUDGE = (
 
 EXTRA_CALL_NOT_RUN = "Not executed: only one execute_python call is run per step."
 EMPTY_CODE = "Not executed: the code argument was empty."
+
+
+# --------------------------------------------------------------------------- ScoRe planner, notes view
+PLANNER_NOTES_MEMORY = """\
+=== Your memory ===
+You do NOT see the full history of this task. Each turn you see only: this prompt, your own progress
+notes from your previous turn, a one-line log of every step so far, and the full outputs of the steps
+taken since your previous turn. So every execute_python call must also include a third argument,
+`progress_notes`: your complete, updated notes, which replace the previous ones. Include what is done,
+every fact/ID/value you may need later (names, IDs, amounts, phone numbers, emails), REPL variable
+names that hold useful data, and what remains. Keep them under ~250 words. Anything not in your notes
+is forgotten, but you can call get_step_output(step=N) to re-read the full output of any step in the log
+(use it sparingly)."""
+
+PLANNER_NOTES_TURN = """\
+=== Your progress notes (from your previous turn) ===
+{notes}
+
+=== Step log (every step so far: number, who, ok/ERROR, first line of code) ===
+{step_log}
+
+=== Variables that exist in the REPL right now ===
+{state}
+
+=== API reference (everything looked up or used so far) ===
+{reference}
+
+=== Since your previous turn ===
+{since}
+
+Now call execute_python with `code` (your next step), `executor_instructions` and `progress_notes`."""
+
+PLANNER_NOTES_OWN_STEP = """\
+Your step {step}:
+```python
+{code}
+```
+Output:
+```
+{output}
+```"""
+
+NOTES_SINCE_FOOTER = """\
+Handback reason: {reason}
+Environment steps used so far: {steps_used} of {max_steps}."""
+
+FETCH_RESULT = "Full output of step {step} ({actor}):\n{output}"
+FETCH_NOT_FOUND = "There is no step {step}. Valid steps: 1 to {last}."
+FETCH_LIMIT = "Fetch limit reached for this turn. Continue with execute_python."
+
+EXECUTOR_NOTES_SECTION = """
+=== The planner's notes on overall progress ===
+{notes}
+"""
+
+REJECTED = """\
+Not executed: this code would fail or silently do the wrong thing.
+{problem}
+Fix it and call execute_python again (this didn't use up a step)."""

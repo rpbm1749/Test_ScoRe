@@ -16,6 +16,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from . import clock
+from .context import SharedContext
 from .llm import Usage
 
 
@@ -48,6 +49,7 @@ class WindowRecord:
     planner_step: int | None
     executor_steps: list[int] = field(default_factory=list)
     handback_reason: str = ""
+    notes: str | None = None          # the planner's progress notes after this turn (notes view)
 
 
 @dataclass
@@ -55,6 +57,13 @@ class GlobalState:
     task_line: str
     planner_messages: list[dict[str, str]] = field(default_factory=list)
     windows: list[WindowRecord] = field(default_factory=list)
+    # "full": the planner keeps one growing conversation with every step's output.
+    # "notes": each planner call is rebuilt from the planner's own progress notes, a one-line log
+    #          of every step, and the full outputs of only the steps since its last turn.
+    view: str = "full"
+    notes: str = ""
+    since_last_turn: str = ""         # notes view: what happened since the planner's last turn
+    shared: SharedContext = field(default_factory=SharedContext)   # state + reference built by the orchestrator
 
 
 @dataclass
@@ -79,6 +88,7 @@ class Trajectory:
         self.steps: list[StepRecord] = []
         self.calls: list[CallRecord] = []
         self.usage: dict[str, Usage] = {}
+        self.rejections: list[dict[str, Any]] = []   # steps the pre-execution check stopped
         self.t0 = clock.now()
 
     def add_call(
@@ -106,4 +116,5 @@ class Trajectory:
             "steps_by_actor": self.steps_by_actor(),
             "steps": [asdict(s) for s in self.steps],
             "calls": [asdict(c) for c in self.calls],
+            "rejections": self.rejections,
         }

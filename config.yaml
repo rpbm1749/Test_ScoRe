@@ -58,6 +58,13 @@ models:
 
 score:
   k: 3                                   # executor steps per window (override with --k)
+  # What the planner sees each turn:
+  #   notes - its own progress notes + a one-line log of every step + full outputs of only the
+  #           steps since its last turn (prompt stays roughly constant; old outputs re-readable
+  #           with the get_step_output tool)
+  #   full  - one growing conversation with every step's full output (the first version)
+  planner_view: notes
+  max_fetches_per_turn: 3                # notes view: get_step_output calls allowed per planner turn
   allow_early_handback: true             # executor may reply "HANDBACK: <reason>" before k steps
   handback_on_consecutive_errors: 3      # hand back after this many failed executions in a row (0 = never)
 
@@ -65,6 +72,7 @@ run:
   max_steps: 50               # environment steps (code executions) per task, all modes
   max_output_chars: 4000      # tool outputs longer than this are cut to head + tail, all modes
   max_no_code_retries: 3      # replies without a code block before giving up
+  max_rejections_in_a_row: 3  # steps the pre-execution check may stop in a row before code runs anyway
 
 tasks:
   file: tasks/dev_hard.txt    # made by select_tasks.py

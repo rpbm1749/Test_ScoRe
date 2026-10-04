@@ -66,6 +66,47 @@ PLANNER_TOOLS: list[dict[str, Any]] = [{
 }]
 
 
+FETCH_TOOL_NAME = "get_step_output"
+
+# Notes view: the planner's tool also carries its progress notes, and it can re-read any old output.
+PLANNER_NOTES_TOOLS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": TOOL_NAME,
+            "description": PLANNER_TOOLS[0]["function"]["description"],
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    **PLANNER_TOOLS[0]["function"]["parameters"]["properties"],
+                    "progress_notes": {
+                        "type": "string",
+                        "description": (
+                            "Your complete, updated notes; they replace your previous notes and are your only "
+                            "memory of earlier steps. Include what is done, every fact/ID/value you may need later, "
+                            "REPL variable names holding useful data, and what remains. Under ~250 words."
+                        ),
+                    },
+                },
+                "required": ["code", "executor_instructions", "progress_notes"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": FETCH_TOOL_NAME,
+            "description": "Re-read the full output of an earlier step (by its number in the step log). Doesn't run anything.",
+            "parameters": {
+                "type": "object",
+                "properties": {"step": {"type": "integer", "description": "Step number from the step log."}},
+                "required": ["step"],
+            },
+        },
+    },
+]
+
+
 @dataclass
 class Action:
     code: str | None
@@ -75,6 +116,7 @@ class Action:
     assistant_message: dict[str, Any]
     extra_tool_messages: list[dict[str, Any]] = field(default_factory=list)
     arguments: dict[str, Any] = field(default_factory=dict)   # parsed tool-call arguments, if JSON
+    tool_name: str = ""
 
 
 def parse_action(res: ChatResult, text_has_instructions: bool = False) -> Action:
@@ -98,7 +140,7 @@ def parse_action(res: ChatResult, text_has_instructions: bool = False) -> Action
             if c is not first
         ]
         return Action(code or None, text.strip(), True, first.get("id", ""), assistant, extra,
-                      parsed if isinstance(parsed, dict) else {})
+                      parsed if isinstance(parsed, dict) else {}, first.get("function", {}).get("name", ""))
 
     code = extract_code(text)
     return Action(code, thought_before_code(text), False, None, assistant)
@@ -130,3 +172,8 @@ def planner_instructions(res: ChatResult, act: Action) -> str | None:
     if isinstance(arg, str) and arg.strip():
         return extract_instructions(arg) or arg.strip()
     return extract_instructions(res.content or "") or extract_instructions(res.reasoning or "")
+
+
+def planner_notes(act: Action) -> str | None:
+    notes = act.arguments.get("progress_notes")
+    return notes.strip() if isinstance(notes, str) and notes.strip() else None
