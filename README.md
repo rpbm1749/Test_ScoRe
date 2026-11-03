@@ -1,7 +1,5 @@
 # Test_ScoRe
 
-> **Team members: start with [TEAM_GUIDE.md](TEAM_GUIDE.md)** for setup, the experiments to run, and how to share results.
-
 Testing the feasibility of ScoRe: a frontier **planner** takes one step and writes instructions,
 then a cheaper **executor** takes the next *k* steps, then control goes back to the planner.
 
