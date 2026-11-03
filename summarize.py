@@ -122,6 +122,10 @@ def main() -> None:
             "errors": sum(1 for r in rows if r.get("error")),
             "estimated_usage_calls": sum(r.get("frontier_estimated_calls", 0) + r.get("cheap_estimated_calls", 0) for r in rows),
             "trimmed_calls": sum(r.get("frontier_trimmed_calls", 0) + r.get("cheap_trimmed_calls", 0) for r in rows),
+            "avg_granted_k": round(sum(r.get("avg_granted_k", 0) for r in rows) / n, 2),
+            "avg_used_steps": round(sum(r.get("avg_used_steps", 0) for r in rows) / n, 2),
+            "pct_declared": round(sum(r.get("pct_declared", 0) for r in rows) / n, 3),
+            "pct_stale": round(sum(r.get("pct_stale", 0) for r in rows) / n, 3),
         }
         row["avg_reasoning_tokens"] = round(sum(r.get("frontier_reasoning_tokens", 0) + r.get("cheap_reasoning_tokens", 0) for r in rows) / n)
         row["avg_groq_hw_s"] = round(sum(hw_time(r) for r in rows) / n, 3)
@@ -147,6 +151,9 @@ def main() -> None:
             mh = sum(hw_time(r) for r in rows if r["task_id"] in data[baseline])
             row["rel_groq_hw_time"] = round(mh / bh, 3) if bh else None
         out_rows.append(row)
+
+    if not out_rows:
+        raise SystemExit("No tasks finished by every run yet. Use --all-tasks or finish the runs.")
 
     cols = list(out_rows[0].keys())
     for r in out_rows:

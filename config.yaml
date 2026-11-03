@@ -57,7 +57,10 @@ models:
     active_params_b: 3.6
 
 score:
-  k: 3                                   # executor steps per window (override with --k)
+  k: 3                                   # default executor steps per window (override with --k)
+  k_default: 3                           # fallback executor steps when planner doesn't declare k
+  k_min: 1                               # minimum steps the planner may grant
+  k_max: 8                               # maximum steps the planner may grant
   # What the planner sees each turn:
   #   notes - its own progress notes + a one-line log of every step + full outputs of only the
   #           steps since its last turn (prompt stays roughly constant; old outputs re-readable

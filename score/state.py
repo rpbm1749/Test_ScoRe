@@ -50,6 +50,11 @@ class WindowRecord:
     executor_steps: list[int] = field(default_factory=list)
     handback_reason: str = ""
     notes: str | None = None          # the planner's progress notes after this turn (notes view)
+    # Dynamic-k bookkeeping (also the training data for a learned router)
+    granted_k: int | None = None      # executor budget actually used for this window
+    declared_k: int | None = None     # raw EXECUTOR_STEPS the planner wrote (before clamping), if any
+    k_source: str = ""                # "declared" | "default" (planner gave none) | "static" (dynamic off)
+    stale_instructions: bool = False  # planner gave no new instructions; the previous block was reused
 
 
 @dataclass

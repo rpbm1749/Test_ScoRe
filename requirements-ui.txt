@@ -1,0 +1,3 @@
+# Dependencies for ScoRe Streamlit Dashboard
+streamlit>=1.35.0
+plotly>=5.20.0

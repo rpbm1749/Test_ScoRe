@@ -4,6 +4,7 @@ run_single   - ReAct with one model. Used for both baselines:
                frontier-only (120B every step) and executor-only (20B every step).
 run_score    - ScoRe: the planner takes one step and writes an instruction block,
                then the executor takes up to k steps, then control returns to the planner.
+               k is either fixed (score.dynamic_k: false) or declared by the planner per window.
 
 All three return (end_reason, Trajectory, extra_info). Evaluation happens in run.py.
 """
@@ -28,6 +29,7 @@ from .context import validate_step
 from .llm import LLMClient
 from .parsing import (
     calls_complete_task,
+    declared_k,
     extract_handback,
     is_error_output,
     truncate,
@@ -373,9 +375,9 @@ def _since_last_turn(lstate: LocalState, planner_step: int | None, reason: str, 
     return "\n\n".join(parts)
 
 
-def _notes_view_messages(gstate: GlobalState, traj: Trajectory, k: int, env: Any) -> list[dict[str, str]]:
+def _notes_view_messages(gstate: GlobalState, traj: Trajectory, k: int, k_min: int, k_max: int, env: Any) -> list[dict[str, str]]:
     """Notes view: build the planner's whole prompt from scratch for this turn."""
-    head = P.PLANNER_PROMPT.format(guide=P.APPWORLD_GUIDE, k=k, task_line=gstate.task_line)
+    head = P.PLANNER_PROMPT.format(guide=P.APPWORLD_GUIDE, k=k, k_min=k_min, k_max=k_max, task_line=gstate.task_line)
     turn = P.PLANNER_NOTES_TURN.format(
         notes=gstate.notes or "(none yet)",
         step_log=_step_log(traj),
@@ -387,20 +389,30 @@ def _notes_view_messages(gstate: GlobalState, traj: Trajectory, k: int, env: Any
 
 
 def run_score(env: Any, planner: LLMClient, executor: LLMClient, cfg: dict[str, Any], verbose: bool = True) -> tuple[str, Trajectory, dict]:
-    k = int(cfg["score"]["k"])
-    traj = Trajectory(env.task_id, mode="score", k=k)
+    score_cfg = cfg["score"]
+    # Legacy key 'k' still accepted as k_default.
+    k_default = int(score_cfg.get("k_default", score_cfg.get("k", 3)))
+    k_min = int(score_cfg.get("k_min", 1))
+    k_max = int(score_cfg.get("k_max", 8))
+    dynamic = bool(score_cfg.get("dynamic_k", True))
+    traj = Trajectory(env.task_id, mode="score", k=k_default)
     gstate = GlobalState(task_line=_task_line(env))
-    gstate.view = str(cfg["score"].get("planner_view", "full"))
+    gstate.view = str(score_cfg.get("planner_view", "full"))
     if gstate.view not in ("full", "notes"):
         raise ValueError(f"score.planner_view must be 'full' or 'notes', not {gstate.view!r}")
     gstate.planner_messages = [{
         "role": "user",
-        "content": P.PLANNER_PROMPT.format(guide=P.APPWORLD_GUIDE, k=k, task_line=gstate.task_line)
-        + "\n\n" + P.PLANNER_FIRST_TURN_NOTE,
+        "content": P.PLANNER_PROMPT.format(
+            guide=P.APPWORLD_GUIDE,
+            k=k_default,
+            k_min=k_min,
+            k_max=k_max,
+            task_line=gstate.task_line,
+        ) + "\n\n" + P.PLANNER_FIRST_TURN_NOTE,
     }]
 
     try:
-        end_reason = _score_loop(env, planner, executor, cfg, verbose, k, traj, gstate)
+        end_reason = _score_loop(env, planner, executor, cfg, verbose, k_default, k_min, k_max, dynamic, traj, gstate)
     except Exception as e:
         raise _attach(e, traj)
     return end_reason, traj, _windows_info(gstate)
@@ -416,13 +428,17 @@ def _windows_info(gstate: GlobalState) -> dict:
                 "handback_reason": w.handback_reason,
                 "instructions": w.instructions,
                 "notes": w.notes,
+                "granted_k": w.granted_k,
+                "declared_k": w.declared_k,
+                "k_source": w.k_source,
+                "stale_instructions": w.stale_instructions,
             }
             for w in gstate.windows
         ]
     }
 
 
-def _score_loop(env, planner, executor, cfg, verbose, k, traj, gstate) -> str:
+def _score_loop(env, planner, executor, cfg, verbose, k_default, k_min, k_max, dynamic, traj, gstate) -> str:
     window = 0
     last_instructions = "(none yet)"
     end_reason = ""
@@ -435,7 +451,7 @@ def _score_loop(env, planner, executor, cfg, verbose, k, traj, gstate) -> str:
             break
         window += 1
         if gstate.view == "notes":
-            gstate.planner_messages = _notes_view_messages(gstate, traj, k, env)
+            gstate.planner_messages = _notes_view_messages(gstate, traj, k_default, k_min, k_max, env)
         instructions, code, p_output, in_tool, stop = _planner_turn(env, planner, gstate, traj, window, cfg, verbose)
         wrec = WindowRecord(window=window, instructions=instructions, planner_step=env.steps if code else None,
                             notes=gstate.notes if gstate.view == "notes" else None)
@@ -443,16 +459,31 @@ def _score_loop(env, planner, executor, cfg, verbose, k, traj, gstate) -> str:
         if stop:
             end_reason = stop
             break
+        wrec.stale_instructions = not instructions
         if instructions:
             last_instructions = instructions
+        elif verbose:
+            _log(verbose, f"  [planner  w{window}] no new instructions: reusing the previous block")
         if env.completed():
             end_reason = "completed"
             break
 
         gstate.shared.record_text(env, last_instructions)   # look up every API the instructions name
+
+        # Resolve this window's executor budget.
+        raw_k = declared_k(last_instructions)
+        wrec.declared_k = raw_k
+        if dynamic and raw_k is not None:
+            window_k = max(k_min, min(k_max, raw_k))
+            wrec.k_source = "declared"
+        else:
+            window_k = k_default
+            wrec.k_source = "default" if dynamic else "static"
+        wrec.granted_k = window_k
+
         lstate = LocalState(window=window, instructions=last_instructions, planner_code=code, planner_output=p_output)
-        if k > 0:
-            reason = _executor_window(env, executor, gstate, lstate, traj, k, cfg, verbose)
+        if window_k > 0:
+            reason = _executor_window(env, executor, gstate, lstate, traj, window_k, cfg, verbose)
         else:
             reason = "k=0 (no executor)"
         wrec.executor_steps = [s.step for s in lstate.step_records]

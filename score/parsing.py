@@ -10,6 +10,7 @@ _FULL_CODE = re.compile(r"```(?:python|py)[ \t]*\n(.*?)```", re.DOTALL | re.IGNO
 _PARTIAL_CODE = re.compile(r"```(?:python|py)[ \t]*\n(.*)$", re.DOTALL | re.IGNORECASE)
 _INSTRUCTIONS = re.compile(r"<instructions>(.*?)</instructions>", re.DOTALL | re.IGNORECASE)
 _HANDBACK = re.compile(r"^\s*HANDBACK\s*:\s*(.+)$", re.MULTILINE | re.IGNORECASE)
+_COMPLETE_TASK = re.compile(r"apis\s*\.\s*supervisor\s*\.\s*complete_task\s*\(")
 
 
 def extract_code(text: str) -> str | None:
@@ -47,7 +48,9 @@ def extract_handback(text: str) -> str | None:
 
 
 def calls_complete_task(code: str) -> bool:
-    return "complete_task" in code
+    """True only for an actual call to apis.supervisor.complete_task(...), not for a doc lookup
+    or a mention in a comment/string that merely contains the name."""
+    return bool(_COMPLETE_TASK.search(code))
 
 
 def is_error_output(output: str) -> bool:
@@ -63,7 +66,34 @@ def truncate(text: str, max_chars: int) -> str:
     return f"{text[:half]}\n... [{cut} characters truncated] ...\n{text[-half:]}"
 
 
+# Tolerant: matches "EXECUTOR_STEPS: 3", "**EXECUTOR_STEPS: 3**", "- EXECUTOR_STEPS: 3 (simple lookup)".
+_DYNAMIC_K = re.compile(r"EXECUTOR_STEPS\s*\**\s*:\s*\**\s*(\d+)", re.IGNORECASE)
+
 _FENCE = re.compile(r"^```(?:python|py)?\s*\n(.*?)\n?```\s*$", re.DOTALL | re.IGNORECASE)
+
+
+def declared_k(instructions: str | None) -> int | None:
+    """The raw (unclamped) EXECUTOR_STEPS value the planner wrote, or None if absent."""
+    if not instructions:
+        return None
+    m = _DYNAMIC_K.search(instructions)
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except ValueError:
+        return None
+
+
+def extract_dynamic_k(instructions: str | None, k_default: int, k_min: int, k_max: int) -> int:
+    """Parse EXECUTOR_STEPS: N from the planner's instruction block.
+
+    Returns the planner-declared k clamped to [k_min, k_max], or k_default if the
+    line is absent or unparseable."""
+    declared = declared_k(instructions)
+    if declared is None:
+        return k_default
+    return max(k_min, min(k_max, declared))
 
 
 def code_from_arguments(arguments: Any) -> str:
@@ -75,7 +105,12 @@ def code_from_arguments(arguments: Any) -> str:
         except (json.JSONDecodeError, ValueError):
             code = arguments
     if isinstance(code, dict):
-        code = code.get("code") or next((v for v in code.values() if isinstance(v, str)), "")
+        if "code" in code:
+            # Use ONLY the "code" key. Falling through to another string argument (e.g.
+            # executor_instructions) would run the instruction block as Python.
+            code = code["code"]
+        else:
+            code = next((v for v in code.values() if isinstance(v, str)), "")
     code = str(code or "").strip()
     m = _FENCE.match(code)
     return m.group(1).strip() if m else code

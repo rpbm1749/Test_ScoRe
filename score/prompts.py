@@ -124,6 +124,7 @@ tokens), relevant IDs/values you have found, and API names to use.
 Write executor_instructions in exactly this format:
 
 SUBGOAL: <what the executor should achieve in its window>
+EXECUTOR_STEPS: <how many steps you are granting, e.g. 3>
 STEPS:
 1. <concrete step>
 2. ...

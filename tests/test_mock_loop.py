@@ -487,3 +487,24 @@ def test_full_view_unchanged_by_default():
     executor = ScriptedLLM("executor", ["HANDBACK: done"])
     run_score(env, planner, executor, CFG, verbose=False)
     assert len(planner.seen[1]) > 1   # one growing conversation
+
+
+def test_dynamic_k_declared_by_planner():
+    # Planner sets EXECUTOR_STEPS: 4 explicitly, overriding the default k=2
+    env = FakeEnv()
+    dyn_instr = "SUBGOAL: work\nEXECUTOR_STEPS: 4\nSTEPS:\n1. step\nKNOWN:\nSUCCESS CHECK:\nHAND BACK IF:"
+    planner = ScriptedLLM("planner", [
+        plan("p1 = 1", dyn_instr),
+        code("apis.supervisor.complete_task()"),
+    ])
+    executor = ScriptedLLM("executor", [
+        code("e1 = 1"),
+        code("e2 = 1"),
+        code("e3 = 1"),
+        code("e4 = 1"),
+    ])
+    reason, traj, extra = run_score(env, planner, executor, CFG, verbose=False)
+    assert reason == "completed"
+    # Window 1 should have 4 executor steps because planner declared 4
+    assert extra["windows"][0]["executor_steps"] == [2, 3, 4, 5]
+    assert "budget_exhausted (k=4)" in extra["windows"][0]["handback_reason"]
