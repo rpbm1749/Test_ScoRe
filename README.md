@@ -4,7 +4,7 @@ Testing the feasibility of ScoRe: a frontier **planner** takes one step and writ
 then a cheaper **executor** takes the next *k* steps, then control goes back to the planner.
 
 - Task suite: [AppWorld](https://github.com/StonyBrookNLP/appworld): everyday tasks across simulated apps (email, Spotify, Venmo, file system...), solved by writing Python against the apps' APIs. Hard (difficulty 3) tasks typically take 20+ steps, and AppWorld checks the final state automatically.
-- Executor / cheap: `openai/gpt-oss-20b`. Planner / frontier: `nvidia/nemotron-3-super-120b-a12b` (120B total, 12B active), because NVIDIA retired gpt-oss-120b on 2026-09-03. Both run on NVIDIA's free API (build.nvidia.com: no payment details, 40 requests/min shared, no token caps listed).
+- Executor / cheap: `nvidia/nemotron-3.5-lightning-30b-a3b` (30B total, 3B active). Planner / frontier: `nvidia/nemotron-3.5-super-vl-120b-a12b` (120B total, 12B active). History: the first runs used gpt-oss-120b/20b; NVIDIA retired gpt-oss-120b on 2026-09-03 (replaced by Nemotron 3 Super), and on 2026-11-04 stopped serving both Nemotron 3 Super and gpt-oss-20b. Results from different model pairs are not comparable. Both run on NVIDIA's free API (build.nvidia.com: no payment details, 40 requests/min shared, no token caps listed).
 - NVIDIA's model list changes often. `python probe_models.py` lists what's live, tests candidates on a two-turn tool task, and `--use <model-id>` sets the planner in `config.yaml`.
 - Groq's free tier also works (`config.yaml` explains how), but it rejects any request over ~8K tokens, so long tasks need their history trimmed there.
 
@@ -36,8 +36,8 @@ If `pip install` or `appworld install` fails on Windows, run the same steps insi
 Each command runs one condition over the task list. Re-running the same command skips tasks that are already finished, so when the daily quota runs out (the script stops and says so), just run it again the next day.
 
 ```powershell
-python run.py --mode executor --run-name executor_only     # 20B alone: lower reference
-python run.py --mode frontier --run-name frontier_only     # 120B alone: upper reference
+python run.py --mode executor --run-name executor_only     # cheap model alone: lower reference
+python run.py --mode frontier --run-name frontier_only     # frontier model alone: upper reference
 python run.py --mode score --k 3 --run-name score_k3       # ScoRe, k = 3
 python run.py --mode score --k 5 --run-name score_k5       # ...change k per run
 python run.py --mode score --k 3 --view full --run-name score_k3_full   # the growing-history planner, for comparison

@@ -1,7 +1,7 @@
 """The three ways of running a task.
 
 run_single   - ReAct with one model. Used for both baselines:
-               frontier-only (120B every step) and executor-only (20B every step).
+               frontier-only (frontier model every step) and executor-only (cheap model every step).
 run_score    - ScoRe: the planner takes one step and writes an instruction block,
                then the executor takes up to k steps, then control returns to the planner.
                k is either fixed (score.dynamic_k: false) or declared by the planner per window.

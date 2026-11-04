@@ -8,9 +8,9 @@ Read it once top to bottom before starting. The README has the design details.
 ScoRe tests whether an AI agent can call an expensive **frontier model** only at checkpoints and
 let a **cheap model** do the steps in between.
 
-- **Planner (frontier):** `nvidia/nemotron-3-super-120b-a12b`. Takes one step, writes instructions
+- **Planner (frontier):** `nvidia/nemotron-3.5-super-vl-120b-a12b`. Takes one step, writes instructions
   and progress notes.
-- **Executor (cheap):** `openai/gpt-oss-20b`. Takes up to *k* steps following the instructions,
+- **Executor (cheap):** `nvidia/nemotron-3.5-lightning-30b-a3b` (30B total, 3B active). Takes up to *k* steps following the instructions,
   then hands control back.
 - **Task suite:** [AppWorld](https://github.com/StonyBrookNLP/appworld): everyday tasks across
   simulated apps (Venmo, phone, Spotify, Gmail…), solved by writing Python against the apps' APIs,
@@ -21,7 +21,7 @@ We compare three conditions on the same tasks:
 
 | Condition | Command flag | What it is |
 |---|---|---|
-| Executor only | `--mode executor` | the 20B alone (lower reference) |
+| Executor only | `--mode executor` | the cheap model alone (lower reference) |
 | Frontier only | `--mode frontier` | Nemotron alone (upper reference) |
 | ScoRe | `--mode score --k N` | planner + executor |
 
@@ -139,7 +139,7 @@ For E5, copy `config.yaml` to `config_strict.yaml`, change only that line, and p
 | `avg_pass_pct` | average % of checks passed (partial credit) |
 | `avg_env_steps` | code executions per task |
 | `avg_frontier_calls`, `avg_frontier_tokens` | frontier model usage (the thing ScoRe should cut) |
-| `avg_cheap_calls`, `avg_cheap_tokens` | 20B usage |
+| `avg_cheap_calls`, `avg_cheap_tokens` | cheap-model usage |
 | `avg_fetches` | how often the planner re-read an old output (notes view) |
 | `avg_rejections` | steps the pre-execution checker stopped (and corrected) |
 | `est_usd_per_task` | cost at listed prices (Nemotron price is a placeholder) |
@@ -187,7 +187,7 @@ published unencrypted).
 ## 9. Known limitations (say these in the write-up)
 
 - Results so far are from **one task**. Nothing is conclusive until E1/E2 run on all 20.
-- Planner and executor are from **different model families** (NVIDIA vs OpenAI), because NVIDIA retired gpt-oss-120b.
+- The models changed twice because NVIDIA stopped serving them (gpt-oss-120b on 2026-09-03; Nemotron 3 Super and gpt-oss-20b on 2026-11-04). The results table above is from the old pair (Nemotron 3 Super + gpt-oss-20b); runs with the current pair need fresh baselines.
 - Nemotron's **price is a placeholder**. Rely on tokens, calls and the `rel_cost_R*` columns rather than dollars.
 - NVIDIA doesn't report hardware timing, so those columns are 0. `avg_latency_s` (our own measurement) is real.
 - The pre-execution checker applies to **all** modes, so the baselines get it too (fair comparison).

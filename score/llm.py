@@ -303,8 +303,22 @@ class LLMClient:
             latency = clock.now() - t0
 
             if resp.status_code == 200:
-                data = resp.json()
-                msg = data["choices"][0]["message"]
+                try:
+                    data = resp.json()
+                except ValueError:
+                    data = None
+                choices = data.get("choices") if isinstance(data, dict) else None
+                if not choices or not isinstance(choices[0], dict) or "message" not in choices[0]:
+                    # The provider said 200 but sent no reply (seen on NVIDIA: an error or overload
+                    # message in a success response). Treat it like a server error: log and retry.
+                    self._record(0)
+                    if attempt >= self.max_retries:
+                        raise LLMError(f"{self.name}: HTTP 200 without a reply after {attempt} retries: {resp.text[:400]}")
+                    self._log(f"HTTP 200 but no reply in the response ({resp.text[:200]!r}), retrying in {backoff:.0f}s")
+                    time.sleep(backoff)
+                    backoff = min(backoff * 2, 120)
+                    continue
+                msg = choices[0]["message"]
                 usage = parse_usage(data, latency)
                 self._record(max(usage.prompt_tokens - usage.cached_tokens, 0) + usage.completion_tokens)
                 self._last_messages = [dict(m) for m in messages]

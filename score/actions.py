@@ -50,14 +50,13 @@ PLANNER_TOOLS: list[dict[str, Any]] = [{
         "parameters": {
             "type": "object",
             "properties": {
-                "code": {"type": "string", "description": "The Python code for your one step."},
+                "code": {"type": "string", "description": "Your own step (e.g. looking up API docs, a check, finishing), or an empty string when nothing needs you this turn."},
                 "executor_instructions": {
                     "type": "string",
                     "description": (
                         "Instructions for the executor's next window, with the lines SUBGOAL, EXECUTOR_STEPS, STEPS, "
                         "KNOWN, SUCCESS CHECK and HAND BACK IF. EXECUTOR_STEPS must be a line of its own of the form "
-                        "'EXECUTOR_STEPS: N', where N is how many steps you grant the executor (small for simple "
-                        "lookups, larger for multi-stage sequences). Use an empty string only on your final step "
+                        "'EXECUTOR_STEPS: N', where N is the number of steps your instructions need plus one spare. Use an empty string only on your final step "
                         "(the one that calls apis.supervisor.complete_task)."
                     ),
                 },

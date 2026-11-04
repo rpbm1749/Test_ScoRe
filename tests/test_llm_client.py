@@ -221,4 +221,17 @@ def test_probe_use_sets_planner_model(tmp_path, monkeypatch):
 
     new = yaml.safe_load((tmp_path / "config.yaml").read_text())
     assert new["models"]["planner"]["model"] == "moonshotai/kimi-k3"
-    assert new["models"]["executor"]["model"] == "openai/gpt-oss-20b"
+    assert new["models"]["executor"]["model"] == "nvidia/nemotron-3.5-lightning-30b-a3b"
+
+
+def test_200_without_choices_is_retried(monkeypatch):
+    """NVIDIA once answered 200 with no `choices` (crashed the k=7 run). It must be retried."""
+    sleeps = []
+    monkeypatch.setattr(llm_mod.time, "sleep", lambda s: sleeps.append(s))
+    c, calls = client_with([
+        httpx.Response(200, json={"error": {"message": "overloaded"}}),
+        httpx.Response(200, text="not json"),
+        httpx.Response(200, json=OK),
+    ])
+    r = c.chat([{"role": "user", "content": "hi"}])
+    assert r.content.startswith("```python") and len(calls) == 3 and len(sleeps) == 2

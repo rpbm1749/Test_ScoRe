@@ -25,13 +25,14 @@ providers:
 
 models:
   # Frontier model. Used as the planner in ScoRe and as the agent in --mode frontier.
-  # NVIDIA retired gpt-oss-120b on 2026-09-03; Nemotron 3 Super (also 120B, MoE) replaces it.
+  # NVIDIA retired gpt-oss-120b on 2026-09-03 (replaced by Nemotron 3 Super), and stopped serving
+  # Nemotron 3 Super on 2026-11-04 (404 "Function not found"); Nemotron 3.5 Super VL, the same size, replaces it.
   # Run `python probe_models.py` to see which ones are live and working, then
   # `python probe_models.py --use <model-id>` to put the best one here.
   # If you change it, update price_per_m and active_params_b below to match that model.
   planner:
     provider: nvidia
-    model: nvidia/nemotron-3-super-120b-a12b    # 120B total, 12B active per token (MoE)
+    model: nvidia/nemotron-3.5-super-vl-120b-a12b    # 120B total, 12B active per token (MoE)
     max_tokens: 4096
     rpm: 20
     timeout_s: 300
@@ -44,22 +45,24 @@ models:
     active_params_b: 12
 
   # Cheap model. Used as the executor in ScoRe and as the agent in --mode executor.
+  # gpt-oss-20b stopped responding on NVIDIA on 2026-11-04, and no ~20B model there was being served,
+  # so Nemotron 3.5 Lightning (30B total, 3B active per token) replaces it.
   # To run it locally instead: install Ollama, `ollama pull gpt-oss:20b`, then
   # provider: ollama, model: gpt-oss:20b, and delete the rpm line.
   executor:
     provider: nvidia
-    model: openai/gpt-oss-20b
-    reasoning_effort: medium    # low | medium | high (gpt-oss default: medium). Keep it the same across runs you compare.
+    model: nvidia/nemotron-3.5-lightning-30b-a3b    # 30B total, 3B active per token (MoE)
+    reasoning_effort: medium    # low | medium | high. Keep it the same across runs you compare.
     max_tokens: 2048
     rpm: 20
     pass_back_reasoning: true
-    price_per_m: {input: 0.075, cached_input: 0.0375, output: 0.30}
-    active_params_b: 3.6
+    price_per_m: {input: 0.075, cached_input: 0.0375, output: 0.30}   # placeholder, not checked for this model
+    active_params_b: 3
 
 score:
   k: 3                                   # default executor steps per window (override with --k)
   k_default: 3                           # fallback executor steps when planner doesn't declare k
-  k_min: 1                               # minimum steps the planner may grant
+  k_min: 2                               # minimum steps the planner may grant (it once granted 0 to do the work itself)
   k_max: 8                               # maximum steps the planner may grant
   # What the planner sees each turn:
   #   notes - its own progress notes + a one-line log of every step + full outputs of only the
